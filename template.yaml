@@ -1,0 +1,74 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Serverless URL Shortener — create short links, redirect visitors, count clicks.
+  MINIMAL 2-service design: a single Lambda (Function URL, no API Gateway) that
+  also serves its own HTML UI, backed by DynamoDB (TTL + atomic click counter).
+  No S3, no CloudFront. Dedicated stack, region us-east-1.
+
+Parameters:
+  Project:
+    Type: String
+    Default: serverless-url-shortener
+    Description: Logical project name; used for resource naming.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    MemorySize: 128
+    Timeout: 10
+    Architectures: [arm64]
+
+Resources:
+
+  # ------------------------------------------------------------------ DynamoDB
+  LinksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${Project}-links"
+      BillingMode: PAY_PER_REQUEST          # on-demand: pay only per request
+      AttributeDefinitions:
+        - AttributeName: code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: code
+          KeyType: HASH
+      TimeToLiveSpecification:               # auto-expire old links, no cost to delete
+        AttributeName: expires_at
+        Enabled: true
+
+  # -------------------------------------------------------------------- Lambda
+  # One function does everything: serves the HTML UI, creates links,
+  # redirects, and returns stats. Exposed via a free Function URL (no API GW).
+  AppFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${Project}-app"
+      Handler: app.handler
+      CodeUri: src/
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref LinksTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LinksTable
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins: ["*"]
+          AllowMethods: ["*"]
+          AllowHeaders: ["content-type"]
+
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Project}-app"
+      RetentionInDays: 7                     # not "Never Expire" — cost posture
+
+Outputs:
+  SiteUrl:
+    Description: Public URL of the shortener (UI + API + redirects).
+    Value: !GetAtt AppFunctionUrl.FunctionUrl
+  TableName:
+    Description: DynamoDB table holding the links.
+    Value: !Ref LinksTable
